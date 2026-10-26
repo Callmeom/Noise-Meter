@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Noise Meter → ESP32</title>
+<style>
+  body { font-family: system-ui, sans-serif; text-align: center; padding: 24px; background:#111; color:#eee; }
+  #db { font-size: 5rem; margin: 24px 0 4px; }
+  button { font-size: 1.1rem; padding: 12px 20px; margin: 6px; border-radius: 10px; border: 0; }
+  label { display:block; margin-top: 20px; }
+  #status { margin-top: 16px; color:#9ad; min-height: 1.5em; }
+</style>
+</head>
+<body>
+  <h2>Phone Noise Meter → ESP32</h2>
+  <div id="db">--</div>
+  <div>dB (approx.)</div>
+
+  <button id="btn">Connect &amp; Start</button>
+
+  <label>Calibration offset: <span id="offVal">100</span>
+    <input type="range" id="offset" min="60" max="130" value="100">
+  </label>
+  <div id="status"></div>
+
+<script>
+const SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0";
+const CHAR_UUID    = "12345678-1234-5678-1234-56789abcdef1";
+
+const btn = document.getElementById("btn");
+const dbEl = document.getElementById("db");
+const statusEl = document.getElementById("status");
+const offset = document.getElementById("offset");
+const offVal = document.getElementById("offVal");
+offset.oninput = () => offVal.textContent = offset.value;
+
+let bleChar = null, wakeLock = null;
+
+btn.onclick = async () => {
+  try {
+    statusEl.textContent = "Choose NoiseNode…";
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }]
+    });
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    bleChar = await service.getCharacteristic(CHAR_UUID);
+    device.addEventListener("gattserverdisconnected", () => {
+      statusEl.textContent = "Disconnected - tap Connect again";
+      bleChar = null;
+    });
+
+    // Raw mic: turn off processing so levels are not flattened
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    src.connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+
+    try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+
+    statusEl.textContent = "Running - keep this screen open";
+    setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length);
+      const dbfs = 20 * Math.log10(Math.max(rms, 1e-8));   // 0 = full scale, negative otherwise
+      let db = Math.round(dbfs + Number(offset.value));
+      db = Math.min(255, Math.max(0, db));
+      dbEl.textContent = db;
+      if (bleChar) {
+        bleChar.writeValueWithoutResponse(new Uint8Array([db])).catch(() => {});
+      }
+    }, 200);   // 5 updates per second
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+  }
+};
+</script>
+</body>
+</html>
